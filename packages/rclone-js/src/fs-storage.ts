@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, unlink, stat, readdir } from 'node:fs/promises'
+import { mkdir, open, readFile, writeFile, unlink, stat, readdir } from 'node:fs/promises'
 import { join, dirname, relative, resolve } from 'node:path'
 import type { BlobStorage } from './types.js'
 import { TraversalError } from './types.js'
@@ -66,10 +66,34 @@ export function createFsBlobStorage(rootDir: string): BlobStorage {
           readFile(dataFile),
           readFile(metaPath(dataFile), 'utf8'),
         ])
-        return { data: data.buffer as ArrayBuffer, contentType: contentType.trim() }
+        const exact = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
+        return { data: exact, contentType: contentType.trim() }
       } catch (err) {
         if (err instanceof TraversalError) throw err
         return null
+      }
+    },
+
+    async readRange(bucket, key, start, end) {
+      const dataFile = objectPath(rootDir, bucket, key)
+      let fh: Awaited<ReturnType<typeof open>> | null = null
+      try {
+        const [handle, contentType] = await Promise.all([
+          open(dataFile, 'r'),
+          readFile(metaPath(dataFile), 'utf8'),
+        ])
+        fh = handle
+        const info = await fh.stat()
+        const length = Math.max(0, Math.min(end, info.size - 1) - start + 1)
+        const buf = Buffer.allocUnsafe(length)
+        const { bytesRead } = await fh.read(buf, 0, length, start)
+        const slice = buf.buffer.slice(buf.byteOffset, buf.byteOffset + bytesRead) as ArrayBuffer
+        return { data: slice, contentType: contentType.trim(), totalSize: info.size }
+      } catch (err) {
+        if (err instanceof TraversalError) throw err
+        return null
+      } finally {
+        await fh?.close()
       }
     },
 

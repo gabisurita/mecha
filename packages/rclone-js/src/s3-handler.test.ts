@@ -45,6 +45,41 @@ describe('createS3Handler', () => {
     const res = await handler(req)
     expect(res.status).toBe(200)
     expect(Number(res.headers.get('Content-Length'))).toBeGreaterThan(0)
+    expect(res.headers.get('Accept-Ranges')).toBe('bytes')
+  })
+
+  it('handles GET with Range header (partial content and 416)', async () => {
+    const r1 = await handler(new Request('http://localhost/my-bucket/test.txt', {
+      method: 'GET',
+      headers: { Range: 'bytes=0-4' },
+    }))
+    expect(r1.status).toBe(206)
+    expect(r1.headers.get('Content-Range')).toBe('bytes 0-4/11')
+    expect(r1.headers.get('Content-Length')).toBe('5')
+    expect(await r1.text()).toBe('hello')
+
+    const r2 = await handler(new Request('http://localhost/my-bucket/test.txt', {
+      method: 'GET',
+      headers: { Range: 'bytes=6-' },
+    }))
+    expect(r2.status).toBe(206)
+    expect(r2.headers.get('Content-Range')).toBe('bytes 6-10/11')
+    expect(await r2.text()).toBe('world')
+
+    const r3 = await handler(new Request('http://localhost/my-bucket/test.txt', {
+      method: 'GET',
+      headers: { Range: 'bytes=-5' },
+    }))
+    expect(r3.status).toBe(206)
+    expect(r3.headers.get('Content-Range')).toBe('bytes 6-10/11')
+    expect(await r3.text()).toBe('world')
+
+    const r4 = await handler(new Request('http://localhost/my-bucket/test.txt', {
+      method: 'GET',
+      headers: { Range: 'bytes=20-30' },
+    }))
+    expect(r4.status).toBe(416)
+    expect(r4.headers.get('Content-Range')).toBe('bytes */11')
   })
 
   it('handles GET on missing object (404)', async () => {

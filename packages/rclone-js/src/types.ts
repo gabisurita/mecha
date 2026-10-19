@@ -3,6 +3,12 @@
  */
 export interface BlobStorage {
   read(bucket: string, key: string): Promise<{ data: ArrayBuffer; contentType: string } | null>
+  readRange?(
+    bucket: string,
+    key: string,
+    start: number,
+    end: number,
+  ): Promise<{ data: ArrayBuffer; contentType: string; totalSize: number } | null>
   write(bucket: string, key: string, data: ArrayBuffer, contentType: string): Promise<void>
   delete(bucket: string, key: string): Promise<boolean>
   head(bucket: string, key: string): Promise<{ size: number; contentType: string } | null>

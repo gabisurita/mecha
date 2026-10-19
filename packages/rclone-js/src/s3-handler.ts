@@ -33,6 +33,26 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;')
 }
 
+function parseByteRange(header: string, size: number): { start: number; end: number } | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!match || size <= 0) return null
+  const [, startStr, endStr] = match
+  if (!startStr && !endStr) return null
+  if (!startStr) {
+    const suffix = Number(endStr)
+    if (!Number.isFinite(suffix) || suffix <= 0) return null
+    return { start: Math.max(0, size - suffix), end: size - 1 }
+  }
+  const start = Number(startStr)
+  if (!Number.isFinite(start) || start < 0 || start >= size) return null
+  if (!endStr) {
+    return { start, end: size - 1 }
+  }
+  const rawEnd = Number(endStr)
+  if (!Number.isFinite(rawEnd) || rawEnd < start) return null
+  return { start, end: Math.min(rawEnd, size - 1) }
+}
+
 // --- Handler factory ---
 
 /**
@@ -40,7 +60,7 @@ function escapeXml(str: string): string {
  *
  * Supported operations:
  *   PUT    /{bucket}/{key}                — store object
- *   GET    /{bucket}/{key}                — retrieve object
+ *   GET    /{bucket}/{key}                — retrieve object (full or Range)
  *   HEAD   /{bucket}/{key}                — object metadata
  *   DELETE /{bucket}/{key}                — remove object
  *   GET    /{bucket}?list-type=2[&prefix] — list objects (ListObjectsV2)
@@ -85,6 +105,45 @@ export function makeS3Handler(storage: BlobStorage): (req: Request) => Promise<R
         }
 
         case 'GET': {
+          const rangeHeader = req.headers.get('Range')
+          if (rangeHeader) {
+            const meta = await storage.head(bucket, key)
+            if (!meta) return new Response('Not Found', { status: 404 })
+            const range = parseByteRange(rangeHeader, meta.size)
+            if (!range) {
+              return new Response('Range Not Satisfiable', {
+                status: 416,
+                headers: { 'Content-Range': `bytes */${meta.size}` },
+              })
+            }
+            const { start, end } = range
+            let sliceData: ArrayBuffer
+            let contentType = meta.contentType
+            let totalSize = meta.size
+            if (storage.readRange) {
+              const ranged = await storage.readRange(bucket, key, start, end)
+              if (!ranged) return new Response('Not Found', { status: 404 })
+              sliceData = ranged.data
+              contentType = ranged.contentType
+              totalSize = ranged.totalSize
+            } else {
+              const obj = await storage.read(bucket, key)
+              if (!obj) return new Response('Not Found', { status: 404 })
+              sliceData = obj.data.slice(start, end + 1)
+              contentType = obj.contentType
+              totalSize = obj.data.byteLength
+            }
+            return new Response(sliceData, {
+              status: 206,
+              headers: {
+                'Content-Type': contentType,
+                'Content-Length': String(sliceData.byteLength),
+                'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+                'Accept-Ranges': 'bytes',
+              },
+            })
+          }
+
           const obj = await storage.read(bucket, key)
           if (!obj) return new Response('Not Found', { status: 404 })
           return new Response(obj.data, {
@@ -92,6 +151,7 @@ export function makeS3Handler(storage: BlobStorage): (req: Request) => Promise<R
             headers: {
               'Content-Type': obj.contentType,
               'Content-Length': String(obj.data.byteLength),
+              'Accept-Ranges': 'bytes',
             },
           })
         }
@@ -104,6 +164,7 @@ export function makeS3Handler(storage: BlobStorage): (req: Request) => Promise<R
             headers: {
               'Content-Type': meta.contentType,
               'Content-Length': String(meta.size),
+              'Accept-Ranges': 'bytes',
             },
           })
         }

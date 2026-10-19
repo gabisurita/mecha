@@ -28,16 +28,23 @@ export function createIdbBlobStorage(dbName = 'mecha-blobs'): BlobStorage {
     return `${bucket}/${key}`
   }
 
-  function idbGet(db: IDBDatabase, key: string): Promise<{ data: ArrayBuffer; contentType: string } | undefined> {
+  type StoredObject = {
+    blob?: Blob
+    data?: ArrayBuffer
+    size?: number
+    contentType: string
+  }
+
+  function idbGet(db: IDBDatabase, key: string): Promise<StoredObject | undefined> {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly')
       const req = tx.objectStore(STORE_NAME).get(key)
-      req.onsuccess = () => resolve(req.result as { data: ArrayBuffer; contentType: string } | undefined)
+      req.onsuccess = () => resolve(req.result as StoredObject | undefined)
       req.onerror = () => reject(req.error)
     })
   }
 
-  function idbPut(db: IDBDatabase, key: string, value: { data: ArrayBuffer; contentType: string }): Promise<void> {
+  function idbPut(db: IDBDatabase, key: string, value: StoredObject): Promise<void> {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const req = tx.objectStore(STORE_NAME).put(value, key)
@@ -64,17 +71,34 @@ export function createIdbBlobStorage(dbName = 'mecha-blobs'): BlobStorage {
     })
   }
 
+  function entrySize(entry: StoredObject): number {
+    return entry.size ?? entry.blob?.size ?? entry.data?.byteLength ?? 0
+  }
+
   return {
     async read(bucket, key) {
       const db = await getDB()
       const entry = await idbGet(db, storeKey(bucket, key))
       if (!entry) return null
-      return { data: entry.data, contentType: entry.contentType }
+      const data = entry.blob ? await entry.blob.arrayBuffer() : entry.data!
+      return { data, contentType: entry.contentType }
+    },
+
+    async readRange(bucket, key, start, end) {
+      const db = await getDB()
+      const entry = await idbGet(db, storeKey(bucket, key))
+      if (!entry) return null
+      const totalSize = entrySize(entry)
+      const data = entry.blob
+        ? await entry.blob.slice(start, end + 1).arrayBuffer()
+        : entry.data!.slice(start, end + 1)
+      return { data, contentType: entry.contentType, totalSize }
     },
 
     async write(bucket, key, data, contentType) {
       const db = await getDB()
-      await idbPut(db, storeKey(bucket, key), { data, contentType })
+      const blob = new Blob([data], { type: contentType })
+      await idbPut(db, storeKey(bucket, key), { blob, size: data.byteLength, contentType })
     },
 
     async delete(bucket, key) {
@@ -86,7 +110,7 @@ export function createIdbBlobStorage(dbName = 'mecha-blobs'): BlobStorage {
       const db = await getDB()
       const entry = await idbGet(db, storeKey(bucket, key))
       if (!entry) return null
-      return { size: entry.data.byteLength, contentType: entry.contentType }
+      return { size: entrySize(entry), contentType: entry.contentType }
     },
 
     async list(bucket, prefix) {
